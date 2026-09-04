@@ -1,0 +1,59 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: lenny-growth-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lenny
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lenny"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: lenny-growth-backend
+    restart: unless-stopped
+    environment:
+      APP_NAME: Lenny Growth Assistant API
+      APP_VERSION: 0.1.0
+      ENVIRONMENT: development
+
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/lenny
+
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: gemma3:4b
+
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_MODEL: claude-3-5-sonnet-latest
+
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+
+      TRANSCRIPT_SOURCE_DIR: /app/data/lenny-transcripts-source/episodes
+
+      CORS_ORIGINS: http://localhost:3000
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./data/lenny-transcripts-source:/app/data/lenny-transcripts-source:ro
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres_data:
