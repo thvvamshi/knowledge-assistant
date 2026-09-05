@@ -38,6 +38,7 @@ async def get_providers():
 
     ollama_configured = bool(settings.ollama_base_url)
     anthropic_configured = bool(settings.anthropic_api_key)
+    openrouter_configured = bool(settings.openrouter_api_key)
 
     ollama_available = False
 
@@ -63,6 +64,13 @@ async def get_providers():
                 "model": settings.anthropic_model,
                 "configured": anthropic_configured,
                 "available": anthropic_configured,
+            },
+            {
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "model": settings.openrouter_model,
+                "configured": openrouter_configured,
+                "available": openrouter_configured,
             },
         ],
     }

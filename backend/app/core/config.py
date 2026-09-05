@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-3-5-sonnet-latest"
 
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "openrouter/free"
+
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
 
