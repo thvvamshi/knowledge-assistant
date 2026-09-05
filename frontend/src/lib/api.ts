@@ -10,6 +10,12 @@ export interface SourceCitation {
   url: string | null;
 }
 
+export interface MessageArtifact {
+  type: "markdown" | "html";
+  title: string;
+  content: string;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -19,6 +25,7 @@ export interface Message {
   model: string | null;
   sources: SourceCitation[];
   created_at: string;
+  artifact?: MessageArtifact | null;
 }
 
 export interface Session {
@@ -41,6 +48,22 @@ export interface ProvidersResponse {
   providers: ProviderInfo[];
 }
 
+async function parseError(
+  response: Response,
+  fallback: string,
+): Promise<Error> {
+  try {
+    const body = await response.json().catch(() => null);
+
+    const message =
+      body?.message ?? body?.detail?.message ?? body?.detail ?? fallback;
+
+    return new Error(String(message));
+  } catch {
+    return new Error(fallback);
+  }
+}
+
 export async function createSession(title?: string): Promise<Session> {
   const response = await fetch(`${API_BASE_URL}/api/sessions`, {
     method: "POST",
@@ -53,21 +76,38 @@ export async function createSession(title?: string): Promise<Session> {
   });
 
   if (!response.ok) {
-    throw new Error("Failed to create session");
+    throw await parseError(response, "Failed to create session.");
   }
 
   return response.json();
 }
 
-export async function getMessages(
-  sessionId: string,
-): Promise<Message[]> {
+export async function getSessions(): Promise<Session[]> {
+  const response = await fetch(`${API_BASE_URL}/api/sessions`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw await parseError(response, "Failed to load sessions.");
+  }
+
+  return response.json();
+}
+
+export async function getMessages(sessionId: string): Promise<Message[]> {
+  if (!sessionId) {
+    return [];
+  }
+
   const response = await fetch(
-    `${API_BASE_URL}/api/sessions/${sessionId}/messages`,
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      cache: "no-store",
+    },
   );
 
   if (!response.ok) {
-    throw new Error("Failed to load messages");
+    throw await parseError(response, "Failed to load messages.");
   }
 
   return response.json();
@@ -78,36 +118,137 @@ export async function sendMessage(
   content: string,
   provider?: Provider,
 ): Promise<Message> {
+  if (!sessionId) {
+    throw new Error("A conversation is required.");
+  }
+
+  const trimmed = content.trim();
+
+  if (!trimmed) {
+    throw new Error("Message cannot be empty.");
+  }
+
   const response = await fetch(
-    `${API_BASE_URL}/api/sessions/${sessionId}/messages`,
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        content,
+        content: trimmed,
         provider,
       }),
     },
   );
 
   if (!response.ok) {
-    const errorBody = await response.json().catch(() => null);
-
-    throw new Error(
-      errorBody?.message ?? "Failed to send message",
-    );
+    throw await parseError(response, "Failed to send message.");
   }
 
   return response.json();
 }
 
 export async function getProviders(): Promise<ProvidersResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/providers`);
+  const response = await fetch(`${API_BASE_URL}/api/providers`, {
+    cache: "no-store",
+  });
 
   if (!response.ok) {
-    throw new Error("Failed to load providers");
+    throw await parseError(response, "Failed to load providers.");
+  }
+
+  return response.json();
+}
+
+export function createConversationTitle(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return "New chat";
+  }
+
+  const cleaned = normalized
+    .replace(/^(please|can you|could you|would you)\s+/i, "")
+    .replace(/[?.!]+$/, "")
+    .trim();
+
+  if (!cleaned) {
+    return "New chat";
+  }
+
+  const words = cleaned.split(/\s+/);
+
+  const title = words.length > 7 ? `${words.slice(0, 7).join(" ")}…` : cleaned;
+
+  return title.charAt(0).toUpperCase() + title.slice(1);
+}
+
+
+export async function editMessage(
+  sessionId: string,
+  messageId: string,
+  content: string,
+  provider: Provider | null,
+): Promise<Message> {
+  const trimmed = content.trim();
+
+  if (!trimmed) {
+    throw new Error("Message cannot be empty.");
+  }
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(
+      sessionId,
+    )}/messages/${encodeURIComponent(messageId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content: trimmed,
+        provider,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw await parseError(
+      response,
+      "Unable to edit message.",
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function retryMessage(
+  sessionId: string,
+  messageId: string,
+  provider: Provider | null,
+): Promise<Message> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(
+      sessionId,
+    )}/messages/${encodeURIComponent(messageId)}/retry`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw await parseError(
+      response,
+      "Unable to retry message.",
+    );
   }
 
   return response.json();

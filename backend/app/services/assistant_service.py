@@ -8,10 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.assistant_agent import AssistantAgent
 from app.models.message import Message
 from app.providers.factory import get_llm_provider
-from app.rag.context import build_rag_context, format_source_citations
+from app.rag.context import (
+    build_rag_context,
+    format_source_citations,
+)
 from app.rag.retriever import retrieve_chunks
 from app.services.artifact_service import ArtifactService
-from app.services.query_resolver import build_retrieval_query
+from app.services.query_resolver import (
+    build_retrieval_query,
+    is_conversational_query,
+)
 
 
 @dataclass
@@ -25,26 +31,39 @@ class AssistantResult:
     artifact_title: str | None = None
 
 
-def _format_history(messages: list[Message]) -> str:
+def _format_history(
+    messages: list[Message],
+) -> str:
     if not messages:
         return "No previous conversation."
 
-    lines = []
+    lines: list[str] = []
 
     for message in messages:
         role = message.role.capitalize()
-        lines.append(f"{role}: {message.content}")
+
+        lines.append(
+            f"{role}: {message.content}"
+        )
 
     return "\n".join(lines)
 
 
-def response_provider_name(provider) -> str:
-    value = getattr(provider, "provider_name", None)
+def response_provider_name(
+    provider,
+) -> str:
+    value = getattr(
+        provider,
+        "provider_name",
+        None,
+    )
 
     if isinstance(value, str) and value.strip():
         return value
 
-    class_name = provider.__class__.__name__.lower()
+    class_name = (
+        provider.__class__.__name__.lower()
+    )
 
     if "ollama" in class_name:
         return "ollama"
@@ -55,11 +74,20 @@ def response_provider_name(provider) -> str:
     if "fallback" in class_name:
         return "fallback"
 
-    return class_name.replace("provider", "")
+    return class_name.replace(
+        "provider",
+        "",
+    )
 
 
-def response_model_name(provider) -> str:
-    model = getattr(provider, "model", None)
+def response_model_name(
+    provider,
+) -> str:
+    model = getattr(
+        provider,
+        "model",
+        None,
+    )
 
     if isinstance(model, str) and model.strip():
         return model
@@ -67,57 +95,29 @@ def response_model_name(provider) -> str:
     return "unknown"
 
 
-def _build_artifact_result(question: str, content: str):
-    if not ArtifactService.is_artifact_request(question):
-        return None
-
-    artifact = ArtifactService.build(
+def _build_artifact_result(
+    question: str,
+    content: str,
+):
+    return ArtifactService.build_for_request(
+        question,
         content,
-        title="Generated Markdown",
-    )
-
-    return artifact
-
-
-def _citation_for_source(source: dict) -> str:
-    episode_title = source.get("episode_title") or "Unknown episode"
-    guest_name = source.get("guest_name") or "Unknown guest"
-    timestamp = source.get("timestamp") or "Unknown timestamp"
-
-    return (
-        f"[Episode: {episode_title}, "
-        f"Guest: {guest_name}, "
-        f"Timestamp: {timestamp}]"
     )
 
 
-def _build_sources_section(sources: list[dict]) -> str:
-    if not sources:
-        return ""
-
-    lines = ["\n\n### Sources"]
-
-    for source in sources:
-        citation = _citation_for_source(source)
-        url = source.get("url")
-
-        if url:
-            lines.append(f"- {citation} — {url}")
-        else:
-            lines.append(f"- {citation}")
-
-    return "\n".join(lines)
-
-
-def _remove_source_number_tokens(answer: str) -> str:
+def _remove_source_number_tokens(
+    answer: str,
+) -> str:
     """
-    Remove internal RAG source notation if an LLM leaks it into the answer.
+    Remove internal RAG source notation if the LLM
+    leaks it into the answer.
 
     Examples:
         [SOURCE 1]
         [SOURCE 2]
         [SOURCE 10]
     """
+
     return re.sub(
         r"\[SOURCE\s+\d+\]",
         "",
@@ -126,24 +126,106 @@ def _remove_source_number_tokens(answer: str) -> str:
     )
 
 
-def _normalize_answer(answer: str, sources: list[dict]) -> str:
+def _remove_embedded_sources_section(
+    answer: str,
+) -> str:
     """
-    Make source attribution deterministic.
+    Remove an LLM/backend-generated Sources section
+    from the answer content.
 
-    The LLM is responsible for writing the answer.
-    The backend is responsible for exposing authoritative source metadata.
+    Sources are persisted separately in the structured
+    `sources` field and rendered by the frontend.
 
-    This prevents hallucinated episode/guest/timestamp metadata and prevents
-    internal SOURCE N identifiers from leaking to the user.
+    This prevents duplicate citations such as:
+
+        answer
+        ### Sources
+        - ...
+
+        Sources
+        - ...
+
+    The function handles Markdown-style source sections
+    if an LLM happens to generate one.
     """
-    cleaned = _remove_source_number_tokens(answer).strip()
 
-    sources_section = _build_sources_section(sources)
+    if not answer.strip():
+        return ""
 
-    if not sources_section:
-        return cleaned
+    patterns = [
+        r"\n\s*#{1,6}\s*Sources?\s*:?\s*\n[\s\S]*$",
+        r"\n\s*#{1,6}\s*References?\s*:?\s*\n[\s\S]*$",
+    ]
 
-    return f"{cleaned}{sources_section}"
+    cleaned = answer
+
+    for pattern in patterns:
+        cleaned = re.sub(
+            pattern,
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+    return cleaned.strip()
+
+
+def _normalize_answer(
+    answer: str,
+) -> str:
+    """
+    Normalize only the assistant answer.
+
+    Source metadata is intentionally NOT appended here.
+
+    The backend stores sources separately and the frontend
+    renders them from Message.sources.
+    """
+
+    cleaned = _remove_source_number_tokens(
+        answer
+    )
+
+    cleaned = _remove_embedded_sources_section(
+        cleaned
+    )
+
+    return cleaned.strip()
+
+
+async def _retrieve_context(
+    session: AsyncSession,
+    question: str,
+    history: list[Message],
+    top_k: int,
+    similarity_threshold: float,
+):
+    """
+    Retrieve transcript context only when the user
+    message actually requires knowledge retrieval.
+
+    Conversational messages such as "hi" or "thanks"
+    intentionally bypass RAG.
+    """
+
+    retrieval_query = build_retrieval_query(
+        question,
+        history,
+    )
+
+    if not retrieval_query:
+        return build_rag_context([])
+
+    results = await retrieve_chunks(
+        session,
+        retrieval_query,
+        top_k=top_k,
+        similarity_threshold=similarity_threshold,
+    )
+
+    return build_rag_context(
+        results
+    )
 
 
 async def answer_question(
@@ -154,24 +236,36 @@ async def answer_question(
     top_k: int = 5,
     similarity_threshold: float = 0.55,
 ) -> AssistantResult:
-    history = conversation_history or []
-
-    retrieval_query = build_retrieval_query(
-        question,
-        history,
+    history = (
+        conversation_history
+        or []
     )
 
-    results = await retrieve_chunks(
-        session,
-        retrieval_query,
+    conversational = (
+        is_conversational_query(
+            question
+        )
+    )
+
+    rag_context = await _retrieve_context(
+        session=session,
+        question=question,
+        history=history,
         top_k=top_k,
         similarity_threshold=similarity_threshold,
     )
 
-    if not results:
+    # Knowledge questions require retrieved context.
+    #
+    # Conversational messages intentionally bypass RAG.
+    if (
+        not conversational
+        and not rag_context.sources
+    ):
         return AssistantResult(
             answer=(
-                "I do not have sufficient information in the available "
+                "I do not have sufficient "
+                "information in the available "
                 "knowledge base to answer this."
             ),
             provider="none",
@@ -179,11 +273,17 @@ async def answer_question(
             sources=[],
         )
 
-    rag_context = build_rag_context(results)
-    history_text = _format_history(history)
+    history_text = _format_history(
+        history
+    )
 
-    provider = get_llm_provider(provider_name)
-    agent = AssistantAgent(provider=provider)
+    provider = get_llm_provider(
+        provider_name
+    )
+
+    agent = AssistantAgent(
+        provider=provider
+    )
 
     response = await agent.generate(
         question=question,
@@ -191,11 +291,16 @@ async def answer_question(
         history=history_text,
     )
 
-    sources = format_source_citations(results)
+    sources = format_source_citations(
+        rag_context.sources
+    )
 
+    # Only normalize the answer itself.
+    #
+    # Sources remain structured metadata and are NOT
+    # appended to the answer text.
     answer = _normalize_answer(
-        response.content,
-        sources,
+        response.content
     )
 
     artifact = _build_artifact_result(
@@ -208,9 +313,21 @@ async def answer_question(
         provider=response.provider,
         model=response.model,
         sources=sources,
-        artifact_content=artifact.content if artifact else None,
-        artifact_type=artifact.artifact_type if artifact else None,
-        artifact_title=artifact.title if artifact else None,
+        artifact_content=(
+            artifact.content
+            if artifact
+            else None
+        ),
+        artifact_type=(
+            artifact.artifact_type
+            if artifact
+            else None
+        ),
+        artifact_title=(
+            artifact.title
+            if artifact
+            else None
+        ),
     )
 
 
@@ -222,25 +339,36 @@ async def stream_question(
     top_k: int = 5,
     similarity_threshold: float = 0.55,
 ):
-    history = conversation_history or []
-
-    retrieval_query = build_retrieval_query(
-        question,
-        history,
+    history = (
+        conversation_history
+        or []
     )
 
-    results = await retrieve_chunks(
-        session,
-        retrieval_query,
+    conversational = (
+        is_conversational_query(
+            question
+        )
+    )
+
+    rag_context = await _retrieve_context(
+        session=session,
+        question=question,
+        history=history,
         top_k=top_k,
         similarity_threshold=similarity_threshold,
     )
 
-    if not results:
+    # Knowledge questions without retrieved context
+    # must remain grounded.
+    if (
+        not conversational
+        and not rag_context.sources
+    ):
         yield {
             "type": "complete",
             "answer": (
-                "I do not have sufficient information in the available "
+                "I do not have sufficient "
+                "information in the available "
                 "knowledge base to answer this."
             ),
             "provider": "none",
@@ -248,25 +376,40 @@ async def stream_question(
             "sources": [],
             "artifact": None,
         }
+
         return
 
-    rag_context = build_rag_context(results)
-    history_text = _format_history(history)
+    history_text = _format_history(
+        history
+    )
 
-    provider = get_llm_provider(provider_name)
-    agent = AssistantAgent(provider=provider)
+    provider = get_llm_provider(
+        provider_name
+    )
 
-    sources = format_source_citations(results)
+    agent = AssistantAgent(
+        provider=provider
+    )
 
-    yield {
-        "type": "sources",
-        "sources": sources,
-    }
+    sources = format_source_citations(
+        rag_context.sources
+    )
+
+    # Send structured source metadata separately.
+    if sources:
+        yield {
+            "type": "sources",
+            "sources": sources,
+        }
 
     yield {
         "type": "metadata",
-        "provider": response_provider_name(provider),
-        "model": response_model_name(provider),
+        "provider": response_provider_name(
+            provider
+        ),
+        "model": response_model_name(
+            provider
+        ),
     }
 
     full_response: list[str] = []
@@ -276,18 +419,25 @@ async def stream_question(
         rag_context=rag_context,
         history=history_text,
     ):
-        full_response.append(token)
+        full_response.append(
+            token
+        )
 
         yield {
             "type": "token",
             "content": token,
         }
 
-    raw_answer = "".join(full_response)
+    raw_answer = "".join(
+        full_response
+    )
 
+    # Keep persisted/complete answer clean.
+    #
+    # The source list is sent separately through the
+    # `sources` event and the complete event.
     answer = _normalize_answer(
-        raw_answer,
-        sources,
+        raw_answer
     )
 
     artifact = _build_artifact_result(
@@ -310,8 +460,12 @@ async def stream_question(
         yield {
             "type": "complete",
             "answer": answer,
-            "provider": response_provider_name(provider),
-            "model": response_model_name(provider),
+            "provider": response_provider_name(
+                provider
+            ),
+            "model": response_model_name(
+                provider
+            ),
             "sources": sources,
             "artifact": artifact_payload,
         }
@@ -321,10 +475,14 @@ async def stream_question(
     yield {
         "type": "complete",
         "answer": answer,
-        "provider": response_provider_name(provider),
-        "model": response_model_name(provider),
+        "provider": response_provider_name(
+            provider
+        ),
+        "model": response_model_name(
+            provider
+        ),
         "sources": sources,
         "artifact": None,
     }
 
-     
+

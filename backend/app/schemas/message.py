@@ -13,6 +13,18 @@ class MessageCreate(BaseModel):
     provider: Literal["ollama", "anthropic"] | None = None
 
 
+class MessageEdit(BaseModel):
+    content: str = Field(
+        min_length=1,
+        max_length=10000,
+    )
+    provider: Literal["ollama", "anthropic"] | None = None
+
+
+class MessageRetry(BaseModel):
+    provider: Literal["ollama", "anthropic"] | None = None
+
+
 class SourceCitation(BaseModel):
     episode_title: str
     guest_name: str | None = None

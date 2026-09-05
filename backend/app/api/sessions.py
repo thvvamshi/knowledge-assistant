@@ -8,7 +8,10 @@ from app.db.session import get_db
 from app.models.session import Session
 from app.schemas.session import SessionCreate, SessionResponse
 
-router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+router = APIRouter(
+    prefix="/api/sessions",
+    tags=["sessions"],
+)
 
 
 @router.post(
@@ -30,6 +33,22 @@ async def create_session(
 
 
 @router.get(
+    "",
+    response_model=list[SessionResponse],
+)
+async def list_sessions(
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).order_by(
+            Session.updated_at.desc()
+        )
+    )
+
+    return result.scalars().all()
+
+
+@router.get(
     "/{session_id}",
     response_model=SessionResponse,
 )
@@ -38,8 +57,11 @@ async def get_session(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Session).where(Session.id == session_id)
+        select(Session).where(
+            Session.id == session_id
+        )
     )
+
     session = result.scalar_one_or_none()
 
     if session is None:

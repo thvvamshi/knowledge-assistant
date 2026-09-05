@@ -16,10 +16,123 @@ _ARTIFACT_PREFIX_PATTERNS = (
     r"^\s*write\s+(?:a\s+)?markdown\s+(?:about|on|for|explaining|covering)\s+",
     r"^\s*draft\s+(?:a\s+)?markdown\s+(?:about|on|for|explaining|covering)\s+",
     r"^\s*make\s+(?:a\s+)?markdown\s+(?:about|on|for|explaining|covering)\s+",
+
+    r"^\s*create\s+(?:an?\s+)?html(?:\s*/\s*css)?\s+(?:page\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*generate\s+(?:an?\s+)?html(?:\s*/\s*css)?\s+(?:page\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*write\s+(?:an?\s+)?html(?:\s*/\s*css)?\s+(?:page\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*build\s+(?:an?\s+)?html(?:\s*/\s*css)?\s+(?:page\s+)?(?:about|on|for|explaining|covering)\s+",
+
+    r"^\s*create\s+(?:a\s+)?document\s+(?:about|on|for|explaining|covering)\s+",
+    r"^\s*generate\s+(?:a\s+)?document\s+(?:about|on|for|explaining|covering)\s+",
+    r"^\s*write\s+(?:a\s+)?document\s+(?:about|on|for|explaining|covering)\s+",
+    r"^\s*draft\s+(?:a\s+)?document\s+(?:about|on|for|explaining|covering)\s+",
+
+    r"^\s*create\s+(?:a\s+)?30\s*[-]?\s*for\s*[-]?\s*30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*generate\s+(?:a\s+)?30\s*[-]?\s*for\s*[-]?\s*30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*write\s+(?:a\s+)?30\s*[-]?\s*for\s*[-]?\s*30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*draft\s+(?:a\s+)?30\s*[-]?\s*for\s*[-]?\s*30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*make\s+(?:a\s+)?30\s*[-]?\s*for\s*[-]?\s*30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+
+    r"^\s*create\s+(?:a\s+)?ship30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*generate\s+(?:a\s+)?ship30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*write\s+(?:a\s+)?ship30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
+    r"^\s*draft\s+(?:a\s+)?ship30\s+(?:essay\s+)?(?:about|on|for|explaining|covering)\s+",
 )
 
 
-def _is_follow_up_question(question: str) -> bool:
+_CONVERSATIONAL_EXACT_MATCHES = {
+    "hi",
+    "hi!",
+    "hi.",
+    "hello",
+    "hello!",
+    "hello.",
+    "hey",
+    "hey!",
+    "hey.",
+    "yo",
+    "yo!",
+    "thanks",
+    "thanks!",
+    "thank you",
+    "thank you!",
+    "thx",
+    "ty",
+    "good morning",
+    "good morning!",
+    "good afternoon",
+    "good afternoon!",
+    "good evening",
+    "good evening.",
+    "good evening!",
+    "good night",
+    "bye",
+    "bye!",
+    "goodbye",
+    "goodbye!",
+    "ok",
+    "okay",
+    "ok!",
+    "okay!",
+    "cool",
+    "great",
+    "nice",
+    "awesome",
+}
+
+
+_CONVERSATIONAL_PATTERNS = (
+    r"^how\s+are\s+you(?:\s+doing)?[?!.]?$",
+    r"^how's\s+it\s+going[?!.]?$",
+    r"^hows\s+it\s+going[?!.]?$",
+    r"^what(?:'s| is)\s+up[?!.]?$",
+    r"^are\s+you\s+there[?!.]?$",
+    r"^can\s+you\s+hear\s+me[?!.]?$",
+    r"^who\s+are\s+you[?!.]?$",
+    r"^what\s+can\s+you\s+do[?!.]?$",
+    r"^what\s+do\s+you\s+do[?!.]?$",
+    r"^nice\s+to\s+meet\s+you[?!.]?$",
+)
+
+
+def is_conversational_query(
+    question: str,
+) -> bool:
+    """
+    Return True only when the message is clearly casual conversation.
+
+    Conversational messages bypass transcript retrieval so that
+    vector search cannot return an unrelated transcript.
+    """
+
+    text = " ".join(
+        question.strip().lower().split()
+    )
+
+    if not text:
+        return False
+
+    if text in _CONVERSATIONAL_EXACT_MATCHES:
+        return True
+
+    return any(
+        re.fullmatch(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
+        for pattern in _CONVERSATIONAL_PATTERNS
+    )
+
+
+def is_follow_up_question(
+    question: str,
+) -> bool:
+    """
+    Determine whether the current question depends on the previous
+    conversation.
+    """
+
     text = question.strip().lower()
 
     if not text:
@@ -33,27 +146,44 @@ def _is_follow_up_question(question: str) -> bool:
         r"^what\s+about\s+(the\s+)?(?:first|second|third|fourth|fifth|last|next)\s+",
         r"^what\s+about\s+it\b",
         r"^what\s+about\s+that\b",
-        r"^why\s*\??$",
-        r"^how\s+so\s*\??$",
-        r"^what\s+do\s+you\s+mean\s*\??$",
-        r"^what\s+does\s+that\s+mean\s*\??$",
-        r"^and\s+why\s*\??$",
+        r"^why\s*[?!.]?$",
+        r"^how\s+so\s*[?!.]?$",
+        r"^what\s+do\s+you\s+mean\s*[?!.]?$",
+        r"^what\s+does\s+that\s+mean\s*[?!.]?$",
+        r"^and\s+why\s*[?!.]?$",
         r"^and\s+what\s+about\b",
         r"^can\s+you\s+explain\s+that\b",
         r"^can\s+you\s+expand\s+on\s+that\b",
     )
 
     return any(
-        re.search(pattern, text)
+        re.search(
+            pattern,
+            text,
+        )
         for pattern in follow_up_patterns
     )
 
 
-def _strip_artifact_instruction(question: str) -> str:
+def _strip_artifact_instruction(
+    question: str,
+) -> str:
     """
-    Remove the Markdown/artifact output instruction while preserving
+    Remove the artifact/content-format instruction while preserving
     the actual knowledge topic used for transcript retrieval.
+
+    Examples:
+
+        Create a 30 for 30 essay about growth teams.
+        -> growth teams
+
+        Create an HTML page explaining growth loops.
+        -> growth loops
+
+        Create a markdown artifact about retention.
+        -> retention
     """
+
     text = question.strip()
 
     for pattern in _ARTIFACT_PREFIX_PATTERNS:
@@ -66,7 +196,9 @@ def _strip_artifact_instruction(question: str) -> str:
         )
 
         if cleaned != text:
-            return cleaned.strip(" .:,-")
+            return cleaned.strip(
+                " .:,-"
+            )
 
     return text
 
@@ -77,28 +209,41 @@ def _get_previous_context(
     """
     Get the most recent user question and assistant answer pair.
     """
+
     previous_user_question: str | None = None
     previous_assistant_answer: str | None = None
 
-    for message in reversed(conversation_history):
+    for message in reversed(
+        conversation_history
+    ):
         if (
             previous_assistant_answer is None
             and message.role == "assistant"
             and message.content.strip()
         ):
-            previous_assistant_answer = message.content.strip()
+            previous_assistant_answer = (
+                message.content.strip()
+            )
 
         elif (
             previous_user_question is None
             and message.role == "user"
             and message.content.strip()
         ):
-            previous_user_question = message.content.strip()
+            previous_user_question = (
+                message.content.strip()
+            )
 
-        if previous_user_question and previous_assistant_answer:
+        if (
+            previous_user_question
+            and previous_assistant_answer
+        ):
             break
 
-    return previous_user_question, previous_assistant_answer
+    return (
+        previous_user_question,
+        previous_assistant_answer,
+    )
 
 
 def build_retrieval_query(
@@ -106,50 +251,62 @@ def build_retrieval_query(
     conversation_history: list[Message] | None = None,
 ) -> str:
     """
-    Build a retrieval query while preserving the existing conversation
-    follow-up behavior.
+    Build the query used for transcript retrieval.
+
+    Conversational messages:
+        return an empty query so retrieval is skipped.
 
     Standalone questions:
-        returned unchanged.
+        return the question unchanged unless it contains
+        an artifact/content-writing wrapper.
 
     Follow-up questions:
-        include the previous user question and assistant answer.
+        include relevant previous conversation context.
 
-    Markdown artifact requests:
-        remove only the artifact-generation wrapper so retrieval focuses
-        on the requested transcript topic.
+    Artifact requests:
+        remove only the output-format instruction so retrieval
+        focuses on the actual knowledge topic.
     """
+
     question = question.strip()
 
     if not question:
         return ""
 
+    if is_conversational_query(question):
+        return ""
+
     history = conversation_history or []
 
-    if not _is_follow_up_question(question):
-        artifact_query = _strip_artifact_instruction(question)
+    current_query = _strip_artifact_instruction(
+        question
+    )
 
-        if artifact_query != question:
-            return artifact_query
+    if not is_follow_up_question(question):
+        return current_query
 
-        return question
-
-    previous_user_question, previous_assistant_answer = _get_previous_context(
+    (
+        previous_user_question,
+        previous_assistant_answer,
+    ) = _get_previous_context(
         history
     )
 
     if not previous_user_question:
-        return question
+        return current_query
 
-    current_query = _strip_artifact_instruction(question)
+    previous_query = _strip_artifact_instruction(
+        previous_user_question
+    )
 
     parts = [
-        f"Previous user question: {previous_user_question}",
+        f"Previous user question: {previous_query}",
     ]
 
     if previous_assistant_answer:
         parts.append(
-            f"Previous assistant answer: {previous_assistant_answer}"
+            "Previous assistant answer: "
+            f"{previous_assistant_answer}"
         )
 
     parts.append(
