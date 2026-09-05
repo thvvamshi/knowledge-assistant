@@ -1,347 +1,253 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import AsyncGenerator
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.providers.base import LLMProvider
 from app.rag.context import RAGContext
-from app.skills.content_writing import (
-    ContentWritingRequest,
-    ContentWritingSkill,
-)
+
+
+CONTENT_WRITING_INSTRUCTIONS = """
+CONTENT WRITING / SHIP30 MODE
+-----------------------------
+When the user asks for an article, post, newsletter, LinkedIn post, X post,
+blog post, or other publishable content:
+
+- Use the supplied transcript excerpts as the only factual source.
+- Follow the requested format and audience.
+- Start with a strong, useful hook.
+- Use short paragraphs, headings, bullets, and bold anchors where appropriate.
+- Make the result skimmable and practical.
+- Include a concrete takeaway, checklist, framework, or actionable advice
+  when supported by the transcript.
+- Do not invent examples, statistics, quotes, names, claims, or conclusions.
+- Clearly distinguish the guest's perspective from the assistant's framing.
+- Attribute claims to the correct guest and episode.
+- Every substantive transcript-grounded claim must have an exact source
+  citation.
+- Do not use [SOURCE 1], [SOURCE 2], etc. in the final answer.
+"""
 
 
 @dataclass
-class AgentResponse:
-    content: str
-    provider: str
-    model: str
-
-
 class AssistantAgent:
-    """
-    Application-level assistant agent.
-
-    The agent owns conversation instructions, grounding rules, source
-    attribution, and skill selection. LLM execution is delegated to the
-    provider abstraction so the application can use Ollama locally and
-    Anthropic as an optional fallback.
-    """
-
-    def __init__(self, provider: LLMProvider):
-        self.provider = provider
+    provider: LLMProvider
 
     async def generate(
         self,
         question: str,
         rag_context: RAGContext,
-        history: list[dict] | str | None = None,
-    ) -> AgentResponse:
-        if self._is_content_writing_request(question):
-            return await self._generate_content(
-                question=question,
-                rag_context=rag_context,
-                history=history,
-            )
-
-        system_prompt = self._build_system_prompt(
-            rag_context=rag_context,
-        )
-
-        user_prompt = self._build_user_prompt(
+        history: str = "",
+    ):
+        messages = self._build_messages(
             question=question,
+            rag_context=rag_context,
             history=history,
         )
 
         response = await self.provider.generate(
-            system_prompt=system_prompt,
-            user_message=user_prompt,
+            system_prompt=self._message_content(messages[0]),
+            user_message=self._message_content(messages[1]),
         )
 
-        return AgentResponse(
-            content=self._clean_response(response.content),
-            provider=response.provider,
-            model=response.model,
-        )
+        return response
 
     async def stream(
         self,
         question: str,
         rag_context: RAGContext,
-        history: list[dict] | str | None = None,
-    ) -> AsyncGenerator[str, None]:
-        if self._is_content_writing_request(question):
-            async for token in self._stream_content(
-                question=question,
-                rag_context=rag_context,
-                history=history,
-            ):
-                yield token
-
-            return
-
-        system_prompt = self._build_system_prompt(
-            rag_context=rag_context,
-        )
-
-        user_prompt = self._build_user_prompt(
+        history: str = "",
+    ):
+        messages = self._build_messages(
             question=question,
+            rag_context=rag_context,
             history=history,
         )
 
         async for token in self.provider.stream(
-            system_prompt=system_prompt,
-            user_message=user_prompt,
+            system_prompt=self._message_content(messages[0]),
+            user_message=self._message_content(messages[1]),
         ):
             yield token
 
-    async def _generate_content(
+    def _build_messages(
         self,
         question: str,
         rag_context: RAGContext,
-        history: list[dict] | str | None = None,
-    ) -> AgentResponse:
-        history_text = self._format_history(history)
+        history: str,
+    ) -> list:
+        source_mapping = self._build_source_mapping(rag_context)
 
-        request = ContentWritingRequest(
-            topic=question,
-            rag_context=rag_context,
-            conversation_history=history_text,
-        )
+        system_prompt = """
+You are a grounded knowledge assistant.
 
-        skill = ContentWritingSkill()
+Your answers must be based ONLY on the transcript excerpts supplied in the
+retrieved knowledge context.
 
-        prompt = skill.build_prompt(request)
+Do not use outside knowledge to answer the user's question.
 
-        response = await self.provider.generate(
-            system_prompt=self._build_content_system_prompt(),
-            user_message=prompt,
-        )
+GROUNDING RULES
+---------------
+- Never invent facts.
+- Never invent names.
+- Never invent statistics.
+- Never invent examples.
+- Never invent episode titles.
+- Never invent guest names.
+- Never invent timestamps.
+- Never invent source URLs.
+- Do not attribute a claim to a person unless the supplied transcript excerpt
+  supports that attribution.
+- If the retrieved excerpts do not contain enough information, say:
+  "I do not have sufficient information in the available knowledge base to
+  answer this."
 
-        return AgentResponse(
-            content=self._clean_response(response.content),
-            provider=response.provider,
-            model=response.model,
-        )
+CITATION RULES
+--------------
+Every substantive claim derived from a transcript must include a citation.
 
-    async def _stream_content(
-        self,
-        question: str,
-        rag_context: RAGContext,
-        history: list[dict] | str | None = None,
-    ) -> AsyncGenerator[str, None]:
-        history_text = self._format_history(history)
+Use EXACTLY this format:
 
-        request = ContentWritingRequest(
-            topic=question,
-            rag_context=rag_context,
-            conversation_history=history_text,
-        )
+[Episode: EXACT EPISODE TITLE, Guest: EXACT GUEST NAME, Timestamp: EXACT TIMESTAMP]
 
-        skill = ContentWritingSkill()
+The episode title, guest name, and timestamp MUST be copied exactly from the
+SOURCE METADATA.
 
-        prompt = skill.build_prompt(request)
+Do NOT output:
+- [SOURCE 1]
+- [SOURCE 2]
+- [SOURCE N]
+- source numbers as citations
+- invented citation metadata
+- shortened or modified episode titles
+- shortened or modified guest names
+- approximate timestamps
 
-        async for token in self.provider.stream(
-            system_prompt=self._build_content_system_prompt(),
-            user_message=prompt,
-        ):
-            yield token
+SOURCE MAPPING IS IMMUTABLE
+---------------------------
+Each SOURCE number has one fixed metadata record.
 
-    def _build_system_prompt(
-        self,
-        rag_context: RAGContext,
-    ) -> str:
-        source_mapping = self._build_source_mapping(
-            rag_context,
-        )
+For example, if SOURCE 4 contains:
 
-        return f"""
-You are a grounded podcast knowledge assistant.
+Episode: The original growth hacker reveals his secrets
+Guest: Sean Ellis
+Timestamp: 00:01:58
 
-Your job is to answer the user's question using ONLY the retrieved
-transcript evidence supplied below.
+then SOURCE 4 may only be represented using that exact metadata.
 
-GROUNDING RULES:
+Never combine the episode title from one source with the guest or timestamp
+from another source.
 
-- Use only information supported by the supplied transcript excerpts.
-- Do not invent facts, examples, statistics, names, recommendations,
-  experiences, or opinions.
-- Do not use outside knowledge to fill missing information.
-- If the retrieved evidence is insufficient, explicitly say that the
-  transcript knowledge base does not contain enough information to answer.
-- You may combine evidence from multiple transcript excerpts when each
-  individual claim is supported by the relevant source.
-- Keep the answer conversational, useful, and directly relevant to the
-  user's question.
-- Preserve uncertainty when the transcript itself is uncertain.
+ATTRIBUTION RULES
+-----------------
+When a transcript excerpt supports a claim made by a specific guest, identify
+that guest correctly.
 
-SOURCE ATTRIBUTION:
+Do not say "Lenny says" simply because the conversation appears on Lenny's
+podcast.
 
-The source mapping below is immutable and authoritative.
+Lenny is the host unless the retrieved transcript explicitly establishes that
+Lenny is the speaker making the claim.
 
-IMPORTANT:
+If the source metadata identifies the guest as Sean Ellis, do not attribute
+that source's claim to another guest.
 
-- SOURCE N identifies exactly ONE transcript excerpt.
-- You MUST NOT infer or guess that SOURCE N belongs to a different
-  person, episode, or timestamp.
-- A person mentioned in an excerpt is NOT automatically the speaker.
-- Only attribute a statement to the guest when the transcript evidence
-  explicitly supports that attribution.
-- Never swap source metadata between sources.
-- Never fabricate source metadata.
-- Never modify an episode title, guest name, or timestamp.
-- If a timestamp is unavailable, do not invent one.
-
-Citation format:
-
-[Episode: Guest Name, Timestamp/Topic]
-
-If timestamp information is unavailable:
-
-[Episode: Guest Name]
-
-SOURCE MAPPING:
-
-{source_mapping}
-
-RETRIEVED TRANSCRIPT EVIDENCE:
-
-{rag_context.context_text}
+ANSWER QUALITY
+--------------
+- Answer the user's actual question directly.
+- Prefer concise, useful explanations.
+- Do not mention internal retrieval mechanics.
+- Do not mention SOURCE numbers in the final answer.
+- Do not fabricate information to make the answer more complete.
+- When multiple sources support different claims, cite each claim with the
+  correct source.
 """.strip()
 
-    def _build_content_system_prompt(self) -> str:
-        return """
-You are a transcript-grounded content-writing assistant.
+        if self._is_content_writing_request(question):
+            system_prompt += "\n\n" + CONTENT_WRITING_INSTRUCTIONS.strip()
 
-You must follow the provided Ship30 content-writing skill exactly.
-
-Use ONLY the transcript evidence supplied by the skill prompt.
-
-Do not use outside knowledge.
-
-Do not fabricate:
-- facts
-- statistics
-- examples
-- quotes
-- people
-- stories
-- recommendations
-- claims
-- source metadata
-
-Every substantive claim must be supported by the supplied transcript
-evidence.
-
-Use the exact source attribution information provided in the prompt.
-
-If the evidence is insufficient, acknowledge the limitation rather than
-inventing supporting material.
-
-Return Markdown only.
-""".strip()
-
-    def _build_source_mapping(
-        self,
-        rag_context: RAGContext,
-    ) -> str:
-        if not rag_context.sources:
-            return "No sources were retrieved."
-
-        lines = []
-
-        for index, source in enumerate(
-            rag_context.sources,
-            start=1,
-        ):
-            guest = source.guest_name or "Unknown guest"
-            timestamp = source.timestamp or "Timestamp unavailable"
-
-            lines.append(
-                (
-                    f"SOURCE {index}: "
-                    f"Episode='{source.episode_title}'; "
-                    f"Guest='{guest}'; "
-                    f"Timestamp='{timestamp}'"
-                )
-            )
-
-        return "\n".join(lines)
-
-    def _build_user_prompt(
-        self,
-        question: str,
-        history: list[dict] | str | None = None,
-    ) -> str:
-        history_text = self._format_history(history)
-
-        return f"""
-CONVERSATION HISTORY:
-
-{history_text}
-
-CURRENT USER QUESTION:
-
+        user_prompt = f"""
+QUESTION
+--------
 {question}
 
-Answer the current question using the retrieved transcript evidence.
-Maintain continuity with the conversation when relevant, but treat the
-retrieved transcript evidence as the authoritative factual source.
+CONVERSATION HISTORY
+--------------------
+{history or "No previous conversation."}
+
+RETRIEVED TRANSCRIPT KNOWLEDGE
+------------------------------
+{rag_context.context_text}
+
+SOURCE METADATA
+---------------
+{source_mapping}
+
+FINAL INSTRUCTION
+-----------------
+Answer the question using only the retrieved transcript knowledge.
+
+Before producing the answer:
+
+1. Check that every factual claim is supported by a retrieved excerpt.
+2. Check that every guest attribution matches the actual source.
+3. Check that every citation uses the exact episode title, guest name, and
+   timestamp from SOURCE METADATA.
+4. Never output [SOURCE N] notation.
+5. If a claim cannot be supported, remove it rather than guessing.
 """.strip()
 
-    def _format_history(
-        self,
-        history: list[dict] | str | None,
-    ) -> str:
-        if history is None:
-            return "No previous conversation."
-
-        if isinstance(history, str):
-            return history.strip() or "No previous conversation."
-
-        if not history:
-            return "No previous conversation."
-
-        lines = []
-
-        for message in history:
-            if not isinstance(message, dict):
-                continue
-
-            role = message.get("role", "user")
-            content = message.get("content", "")
-
-            if content:
-                lines.append(
-                    f"{str(role).capitalize()}: {content}"
-                )
-
-        return "\n".join(lines) or "No previous conversation."
+        return [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
 
     @staticmethod
-    def _is_content_writing_request(
-        question: str,
-    ) -> bool:
+    def _build_source_mapping(rag_context: RAGContext) -> str:
+        if not rag_context.sources:
+            return "No source metadata available."
+
+        lines: list[str] = []
+
+        for index, source in enumerate(rag_context.sources, start=1):
+            lines.append(
+                f"SOURCE {index}\n"
+                f"Episode: {source.episode_title}\n"
+                f"Guest: {source.guest_name or 'Unknown'}\n"
+                f"Timestamp: {source.timestamp or 'Unknown'}\n"
+                f"URL: {source.youtube_url or 'Unknown'}"
+            )
+
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def _is_content_writing_request(question: str) -> bool:
         normalized = question.lower()
 
-        markers = (
-            "write an article",
-            "write a blog",
-            "write a post",
-            "create an article",
-            "create a blog",
-            "create a post",
-            "ship30",
+        phrases = (
+            "write",
+            "draft",
+            "article",
+            "post",
+            "newsletter",
+            "linkedin",
             "linkedin post",
-            "blog post",
+            "twitter",
+            "x post",
+            "blog",
+            "ship30",
+            "content",
+            "thread",
         )
 
-        return any(
-            marker in normalized
-            for marker in markers
-        )
+        return any(phrase in normalized for phrase in phrases)
 
     @staticmethod
-    def _clean_response(
-        content: str,
-    ) -> str:
-        return content.strip()
+    def _message_content(message) -> str:
+        content = message.content
+
+        if isinstance(content, str):
+            return content
+
+        return str(content)
